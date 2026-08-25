@@ -22,6 +22,20 @@ class WPError(RuntimeError):
     pass
 
 
+def make_client(base, user=None, password=None, transport="rest", verbose=True):
+    """Build a client for whichever channel the host actually allows.
+
+    'rest' is the default and the right choice. Fall back to 'xmlrpc' when the
+    server discards the Authorization header, which makes REST authentication
+    impossible regardless of the credentials - the tell is that a deliberately
+    wrong password returns exactly the same error as sending none at all.
+    """
+    if transport == "xmlrpc":
+        from wpxmlrpc import WPXMLRPC
+        return WPXMLRPC(base, user, password, verbose=verbose)
+    return WP(base, user, password, verbose=verbose)
+
+
 class WP:
     def __init__(self, base, user=None, app_password=None, verbose=True):
         self.base = base.rstrip("/")

@@ -22,7 +22,7 @@ import sys
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from wpclient import WP, WPError          # noqa: E402
+from wpclient import WPError, make_client          # noqa: E402
 
 SIZE_SUFFIX = re.compile(r"-(\d{2,5})x(\d{2,5})(?=\.[A-Za-z0-9]+$)")
 ASSET_REF = re.compile(r'(?P<attr>src|href)="(?P<url>https?://[^"]+?/wp-content/uploads/[^"]+)"')
@@ -373,12 +373,17 @@ def main():
     ap.add_argument("--target", required=True)
     ap.add_argument("--user", required=True)
     ap.add_argument("--app-password", required=True)
+    ap.add_argument("--throttle", type=float, default=0.6,
+                    help="seconds between XML-RPC calls; raise it if the host blocks you")
+    ap.add_argument("--transport", choices=("rest", "xmlrpc"), default="rest",
+                    help="xmlrpc when the host strips the Authorization header")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-update", action="store_true",
                     help="only create missing posts, never touch existing ones")
     args = ap.parse_args()
 
-    wp = WP(args.target, args.user, args.app_password)
+    wp = make_client(args.target, args.user, args.app_password, args.transport,
+                    throttle=args.throttle)
     try:
         me = wp.check_auth()
     except WPError as e:

@@ -26,7 +26,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from wpclient import WP, WPError          # noqa: E402
+from wpclient import WPError, make_client          # noqa: E402
 
 
 def clean_title(raw):
@@ -45,13 +45,18 @@ def main():
                          "e.g. the translated duplicates")
     ap.add_argument("--keep", default="",
                     help="target post slugs to preserve no matter what")
+    ap.add_argument("--throttle", type=float, default=0.6,
+                    help="seconds between XML-RPC calls; raise it if the host blocks you")
+    ap.add_argument("--transport", choices=("rest", "xmlrpc"), default="rest",
+                    help="xmlrpc when the host strips the Authorization header")
     ap.add_argument("--confirm", action="store_true", help="actually do it")
     ap.add_argument("--permanent", action="store_true",
                     help="delete outright instead of moving to the trash")
     ap.add_argument("--plan", default="wipe-plan.json")
     args = ap.parse_args()
 
-    wp = WP(args.target, args.user, args.app_password)
+    wp = make_client(args.target, args.user, args.app_password, args.transport,
+                    throttle=args.throttle)
     try:
         me = wp.check_auth()
     except WPError as e:
