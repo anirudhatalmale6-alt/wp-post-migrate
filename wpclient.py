@@ -22,17 +22,24 @@ class WPError(RuntimeError):
     pass
 
 
-def make_client(base, user=None, password=None, transport="rest", verbose=True):
+def make_client(base, user=None, password=None, transport="rest", verbose=True,
+                throttle=None, **kwargs):
     """Build a client for whichever channel the host actually allows.
 
     'rest' is the default and the right choice. Fall back to 'xmlrpc' when the
     server discards the Authorization header, which makes REST authentication
     impossible regardless of the credentials - the tell is that a deliberately
     wrong password returns exactly the same error as sending none at all.
+
+    throttle (seconds between calls) only means anything to the XML-RPC
+    transport; it is accepted and ignored for REST so callers can pass it
+    unconditionally.
     """
     if transport == "xmlrpc":
         from wpxmlrpc import WPXMLRPC
-        return WPXMLRPC(base, user, password, verbose=verbose)
+        if throttle is not None:
+            kwargs["throttle"] = throttle
+        return WPXMLRPC(base, user, password, verbose=verbose, **kwargs)
     return WP(base, user, password, verbose=verbose)
 
 

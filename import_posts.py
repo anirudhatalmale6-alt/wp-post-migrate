@@ -58,6 +58,10 @@ def sanitize(name):
 
 
 class Importer:
+    # How many uploads may fail back-to-back before we conclude the host
+    # is blocking us rather than that individual files are bad.
+    FAILURE_STREAK = 5
+
     def __init__(self, wp, bundle, dry_run=False, update=True):
         self.wp = wp
         self.bundle = bundle
@@ -190,6 +194,7 @@ class Importer:
                      % len(derived))
         skip = set(derived)
 
+        consecutive_failures = 0
         self.log("bundle contains %d files (%d to upload)"
                  % (len(downloads), len(downloads) - len(skip)))
         for n, (src_url, rel) in enumerate(sorted(downloads.items()), 1):
@@ -247,6 +252,24 @@ class Importer:
                 except WPError as e:
                     self.stats["media_failed"] += 1
                     self.unresolved.append((src_url, str(e)[:160]))
+                    consecutive_failures += 1
+                    # One bad file is a bad file; a run of them means the host
+                    # has stopped accepting uploads. Carrying on would publish
+                    # posts whose images point at files that were never created,
+                    # so stop while the damage is still nothing.
+                    if consecutive_failures >= self.FAILURE_STREAK:
+                        raise WPError(
+                            "%d uploads failed in a row - the host appears to be "
+                            "refusing them, so stopping before any posts are "
+                            "written with missing images. Last error: %s"
+                            % (consecutive_failures, str(e)[:160]))
+                else:
+                    consecutive_failures = 0
+            if n % 10 == 0:
+                # Persist as we go. If the host cuts us off mid-upload, the next
+                # run must know what already landed, or it re-uploads everything
+                # and litters the media library with duplicates.
+                self.save_ledger()
             if n % 25 == 0:
                 self.log("  %d/%d" % (n, len(downloads)))
 
@@ -351,9 +374,28 @@ class Importer:
     def run(self):
         mode = "DRY RUN - nothing will be changed" if self.dry else "LIVE"
         self.log("=== %s ===" % mode)
-        self.log("\n-- categories --");  self.sync_categories()
-        self.log("\n-- media --");       self.sync_media(); self.save_ledger()
-        self.log("\n-- posts --");       self.sync_posts();  self.save_ledger()
+        try:
+            self.log("\n-- categories --");  self.sync_categories()
+            self.log("\n-- media --");       self.sync_media(); self.save_ledger()
+            self.log("\n-- posts --");       self.sync_posts();  self.save_ledger()
+        except WPError as e:
+            # Losing access halfway through is a normal outcome against a host
+            # that rate-limits, not a crash. Keep what was achieved, say where
+            # it stopped, and make clear that re-running continues rather than
+            # starting over.
+            self.save_ledger()
+            self.log("\nSTOPPED: %s" % e)
+            self.log("progress so far: %d categories, %d media, %d posts"
+                     % (self.stats["cats_created"] + self.stats["cats_reused"],
+                        self.stats["media_uploaded"] + self.stats["media_reused"],
+                        self.stats["posts_created"] + self.stats["posts_updated"]))
+            self.log("state saved to %s - re-run the same command to carry on "
+                     "from here; nothing is duplicated."
+                     % os.path.basename(self.ledger_path))
+            self.log("\n=== partial summary ===")
+            for k, v in self.stats.items():
+                self.log("  %-20s %d" % (k.replace("_", " "), v))
+            return 2
         if not self.dry:
             self.log("\nstate written to %s - keep it, it is what makes a re-run "
                      "update instead of duplicate" % os.path.basename(self.ledger_path))
