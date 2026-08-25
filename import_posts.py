@@ -25,7 +25,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wpclient import WPError, make_client          # noqa: E402
 
 SIZE_SUFFIX = re.compile(r"-(\d{2,5})x(\d{2,5})(?=\.[A-Za-z0-9]+$)")
-ASSET_REF = re.compile(r'(?P<attr>src|href)="(?P<url>https?://[^"]+?/wp-content/uploads/[^"]+)"')
+# Both quote styles: WordPress' own [gallery] markup is written with single
+# quotes, so a double-quote-only pattern silently leaves every gallery image
+# linking back to the source site.
+ASSET_REF = re.compile(
+    r"""(?P<attr>src|href)=(?P<q>["'])(?P<url>https?://[^"']+?/wp-content/uploads/[^"']+)(?P=q)""")
+# srcset holds a comma-separated list of "url descriptor" pairs, so the URLs are
+# not inside quotes of their own and ASSET_REF cannot see them. It has to be
+# handled separately - and it matters more than src, because a browser given a
+# srcset picks from it and ignores src entirely.
+SRCSET_REF = re.compile(
+    r"""\s(?P<attr>srcset|data-srcset)=(?P<q>["'])(?P<val>[^"']*?/wp-content/uploads/[^"']*)(?P=q)""")
 
 
 def norm(url):
@@ -275,30 +285,62 @@ class Importer:
 
     # ---------------- content rewriting ----------------
 
+    def resolve(self, url):
+        """Map one uploads URL to its counterpart on the target, or None."""
+        base, size = base_and_size(url)
+        hit = self.media_map.get(norm(url)) or self.media_map.get(norm(base))
+        if not hit:
+            return None
+        target = hit["source_url"]
+        if size:
+            sized = SIZE_SUFFIX.sub("", target)
+            root, ext = os.path.splitext(sized)
+            candidate = root + size + ext
+            sizes = (hit.get("media_details") or {}).get("sizes") or {}
+            have = {os.path.basename(urlparse(s.get("source_url", "")).path)
+                    for s in sizes.values()}
+            # Only keep the -WxH variant if the target really generated it,
+            # otherwise fall back to full size rather than emit a 404.
+            target = candidate if os.path.basename(candidate) in have else sized
+        return target
+
     def rewrite(self, html):
         """Point every uploads URL at the target's own media library."""
         def repl(m):
             url = m.group("url")
-            base, size = base_and_size(url)
-            hit = self.media_map.get(norm(url)) or self.media_map.get(norm(base))
-            if not hit:
+            target = self.resolve(url)
+            if not target:
                 self.stats["links_unresolved"] += 1
                 self.unresolved.append((url, "no media match on target"))
                 return m.group(0)
-            target = hit["source_url"]
-            if size:
-                sized = SIZE_SUFFIX.sub("", target)
-                root, ext = os.path.splitext(sized)
-                candidate = root + size + ext
-                sizes = (hit.get("media_details") or {}).get("sizes") or {}
-                have = {os.path.basename(urlparse(s.get("source_url", "")).path)
-                        for s in sizes.values()}
-                # Only keep the -WxH variant if the target really generated it,
-                # otherwise fall back to full size rather than emit a 404.
-                target = candidate if os.path.basename(candidate) in have else sized
             self.stats["links_rewritten"] += 1
-            return '%s="%s"' % (m.group("attr"), target)
-        return ASSET_REF.sub(repl, html)
+            return "%s=%s%s%s" % (m.group("attr"), m.group("q"), target, m.group("q"))
+
+        def repl_srcset(m):
+            kept = []
+            for part in m.group("val").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                url, _, descriptor = part.partition(" ")
+                target = self.resolve(url)
+                if target:
+                    self.stats["links_rewritten"] += 1
+                    kept.append((target + " " + descriptor).strip())
+                else:
+                    # Leaving the source URL in place would keep the client's
+                    # site loading images from a site they do not control, so
+                    # drop the candidate instead. If nothing survives, drop the
+                    # attribute entirely and the browser falls back to src,
+                    # which by this point already points at the target.
+                    self.stats["links_unresolved"] += 1
+                    self.unresolved.append((url, "srcset candidate dropped"))
+            if not kept:
+                return ""
+            return " %s=%s%s%s" % (m.group("attr"), m.group("q"),
+                                   ", ".join(kept), m.group("q"))
+
+        return SRCSET_REF.sub(repl_srcset, ASSET_REF.sub(repl, html))
 
     # ---------------- posts ----------------
 
