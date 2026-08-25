@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -58,7 +59,11 @@ class WP:
     def request(self, method, path, params=None, body=None, files=None, raw=False):
         url = path if path.startswith("http") else self.root + path
         if params:
-            qs = "&".join("%s=%s" % (k, v) for k, v in params.items() if v is not None)
+            # Values reach here straight from post titles and filenames, so they
+            # contain spaces, accents and ampersands. Commas stay literal because
+            # the REST API uses them for list parameters such as include= .
+            qs = "&".join("%s=%s" % (k, quote(str(v), safe=","))
+                          for k, v in params.items() if v is not None)
             url += ("&" if "?" in url else "?") + qs
         # -X HEAD makes curl send HEAD but still wait for a body, which never
         # arrives - it dies with "transfer closed". --head is the correct flag.
