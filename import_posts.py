@@ -36,6 +36,7 @@ ASSET_REF = re.compile(
 # srcset picks from it and ignores src entirely.
 SRCSET_REF = re.compile(
     r"""\s(?P<attr>srcset|data-srcset)=(?P<q>["'])(?P<val>[^"']*?/wp-content/uploads/[^"']*)(?P=q)""")
+POST_LINK = re.compile(r"""href=(?P<q>["'])(?P<url>https?://[^"']+)(?P=q)""")
 
 
 def norm(url):
@@ -340,7 +341,32 @@ class Importer:
             return " %s=%s%s%s" % (m.group("attr"), m.group("q"),
                                    ", ".join(kept), m.group("q"))
 
-        return SRCSET_REF.sub(repl_srcset, ASSET_REF.sub(repl, html))
+        return self.rewrite_post_links(
+            SRCSET_REF.sub(repl_srcset, ASSET_REF.sub(repl, html)))
+
+    def rewrite_post_links(self, html):
+        """Point cross-references at the migrated copy, not the source site.
+
+        Posts link to each other by absolute URL, so after a migration those
+        links quietly walk the visitor back to the old site. Only rewritten
+        when the target really has a post with that slug - anything else is a
+        genuine reference to a page that was not migrated, and is left alone.
+        """
+        def repl(m):
+            url = m.group("url")
+            p = urlparse(url)
+            if p.netloc.lower().replace("www.", "") != self.source_host:
+                return m.group(0)
+            parts = [s for s in p.path.split("/") if s]
+            if len(parts) != 1:
+                return m.group(0)
+            target_slug = self.post_slug_map.get(parts[0])
+            if not target_slug:
+                return m.group(0)
+            self.stats["links_rewritten"] += 1
+            return "href=%s%s/%s/%s" % (m.group("q"), self.wp.base,
+                                        target_slug, m.group("q"))
+        return POST_LINK.sub(repl, html)
 
     # ---------------- posts ----------------
 
@@ -350,6 +376,16 @@ class Importer:
                                     _fields="id,slug,title,content,date,status,"
                                             "categories,featured_media")}
         self.log("target already has %d posts" % len(existing))
+        # Where a bundle slug lives on the target under a different name - a
+        # purely numeric one WordPress renamed, say - cross-links must follow
+        # the rename, so resolve through the ledger before rewriting anything.
+        self.source_host = urlparse(self.manifest["source"]).netloc.lower().replace("www.", "")
+        ledger = self.ledger.get("posts", {})
+        id_to_slug = {p["id"]: p["slug"] for p in existing.values()}
+        self.post_slug_map = {}
+        for bp in self.manifest["posts"]:
+            target_id = ledger.get(str(bp["id"]))
+            self.post_slug_map[bp["slug"]] = id_to_slug.get(target_id) or bp["slug"]
         for p in self.manifest["posts"]:
             slug = p["slug"]
             content = self.rewrite(p["content"].get("raw") or p["content"].get("rendered") or "")
