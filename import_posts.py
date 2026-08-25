@@ -129,7 +129,8 @@ class Importer:
             return None
         try:
             return self.wp.get("/posts/%d" % pid, context="edit",
-                               _fields="id,slug,title,content,date,categories,featured_media")
+                               _fields="id,slug,title,content,date,status,"
+                                       "categories,featured_media")
         except WPError:
             self.ledger["posts"].pop(str(src_id), None)
             return None
@@ -281,7 +282,8 @@ class Importer:
     def sync_posts(self):
         existing = {p["slug"]: p for p in
                     self.wp.get_all("/posts", status="any", context="edit",
-                                    _fields="id,slug,title,content,date,categories,featured_media")}
+                                    _fields="id,slug,title,content,date,status,"
+                                            "categories,featured_media")}
         self.log("target already has %d posts" % len(existing))
         for p in self.manifest["posts"]:
             slug = p["slug"]
@@ -328,12 +330,18 @@ class Importer:
             same_body = current.strip() == content.strip()
             same_cats = sorted(hit.get("categories") or []) == sorted(cats)
             same_thumb = (hit.get("featured_media") or 0) == body.get("featured_media", 0)
-            if same_body and same_cats and same_thumb:
+            # Status matters as much as content. A trashed post whose body still
+            # matches is not "unchanged" - leaving it alone silently drops it from
+            # the site, which is exactly what happens when re-importing after a
+            # wipe, since the wipe trashes rather than destroys.
+            same_status = hit.get("status") == body["status"]
+            if same_body and same_cats and same_thumb and same_status:
                 self.ledger["posts"][str(p["id"])] = hit["id"]
                 self.stats["posts_unchanged"] += 1
                 continue
             why = ", ".join(w for w, ok in (("content", same_body), ("categories", same_cats),
-                                            ("featured image", same_thumb)) if not ok)
+                                            ("featured image", same_thumb),
+                                            ("status", same_status)) if not ok)
             self.log("  update %-45s (%s differ)" % (slug, why))
             if not self.dry:
                 self.wp.post("/posts/%d" % hit["id"], body)
