@@ -27,6 +27,8 @@ class _HeaderMixin:
         connection.putheader("Accept", "text/xml, */*")
         connection.putheader("Accept-Language", "en-GB,en;q=0.9")
         connection.putheader("Referer", self._referer)
+        if getattr(self, "_cookie", None):
+            connection.putheader("Cookie", self._cookie)
         return super().send_content(connection, body)
 
 
@@ -40,8 +42,9 @@ class _HTTPTransport(_HeaderMixin, xmlrpc.client.Transport):
 
 class WPXMLRPC:
     def __init__(self, base, user, password, blog_id=1, verbose=True,
-                 throttle=0.6, backoff=20.0, max_retries=4):
+                 throttle=0.6, backoff=20.0, max_retries=4, cookie=None):
         self.base = base.rstrip("/")
+        self.cookie = cookie
         self.user = user
         self.password = password
         self.blog_id = blog_id
@@ -53,7 +56,9 @@ class WPXMLRPC:
         secure = self.base.lower().startswith("https://")
         transport = _HTTPSTransport() if secure else _HTTPTransport()
         transport._referer = self.base + "/"
+        transport._cookie = cookie
         transport.user_agent = UA
+        self._transport = transport
         self._server = xmlrpc.client.ServerProxy(
             self.base + "/xmlrpc.php", transport=transport, allow_none=True,
             use_builtin_types=True)
@@ -88,6 +93,11 @@ class WPXMLRPC:
                 raise WPError("%s -> %s: %s" % (method, f.faultCode, f.faultString))
             except xmlrpc.client.ProtocolError as e:
                 self._last_call = time.monotonic()
+                # A 409 here was the bot challenge, not a block - the cookie it
+                # issues is per-visitor and expires, so re-answer it and carry
+                # on rather than backing off for a minute or giving up.
+                if e.errcode == 409 and self._refresh_cookie():
+                    continue
                 throttled = e.errcode in (409, 429, 503, 403)
                 if not throttled or attempt >= self.max_retries:
                     raise WPError("%s -> HTTP %s %s%s" % (
@@ -104,6 +114,18 @@ class WPXMLRPC:
                     raise WPError("%s -> %s" % (method, e))
                 time.sleep(self.backoff * (2 ** attempt))
         raise WPError("%s -> gave up after %d attempts" % (method, self.max_retries + 1))
+
+    def _refresh_cookie(self):
+        """Re-answer the host's bot challenge. True only if the cookie changed,
+        so a genuine block still falls through to the backoff path."""
+        from wpclient import detect_challenge_cookie
+        fresh = detect_challenge_cookie(self.base + "/xmlrpc.php", verbose=False)
+        if not fresh or fresh == self.cookie:
+            return False
+        self.log("  re-answering the host's bot challenge")
+        self.cookie = fresh
+        self._transport._cookie = fresh
+        return True
 
     def log(self, *a):
         if self.verbose:
@@ -350,13 +372,19 @@ class WPXMLRPC:
             return None, {}, 200
         raise WPError("unsupported %s %s for XML-RPC transport" % (method, path))
 
+    def _cookie_args(self, url):
+        """Send the challenge cookie only to the host it was issued by."""
+        if self.cookie and url.startswith(self.base):
+            return ["-b", self.cookie]
+        return []
+
     def _head(self, url):
         """Public HEAD - no authentication involved, so plain curl is fine."""
         if url in self._size_cache:
             return self._size_cache[url]
         p = subprocess.run(
             ["curl", "-sS", "--head", "-L", "--max-time", "60", "-A", UA,
-             "-H", "Referer: " + self.base + "/", url],
+             "-H", "Referer: " + self.base + "/"] + self._cookie_args(url) + [url],
             capture_output=True)
         text = p.stdout.decode("utf-8", errors="replace")
         code, hdrs = 0, {}
@@ -376,7 +404,8 @@ class WPXMLRPC:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         p = subprocess.run(
             ["curl", "-sS", "-L", "--max-time", "300", "-w", "%{http_code}",
-             "-o", dest, "-A", UA, "-H", "Referer: " + self.base + "/", url],
+             "-o", dest, "-A", UA, "-H", "Referer: " + self.base + "/"]
+            + self._cookie_args(url) + [url],
             capture_output=True)
         code = p.stdout.decode(errors="replace").strip()[-3:]
         if code != "200":

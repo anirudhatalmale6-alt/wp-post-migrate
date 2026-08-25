@@ -9,6 +9,7 @@ headers rather than urllib for that reason.
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -17,9 +18,29 @@ from urllib.parse import quote
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
+# Some hosts answer requests they think are automated with a tiny page that
+# sets a cookie and reloads, served under a misleading status code - this one
+# used 409 Conflict, which reads exactly like a permanent block. A real browser
+# runs the script and never notices; a script sees a hard failure. Detect the
+# challenge and satisfy it rather than treating the endpoint as unavailable.
+CHALLENGE_RE = re.compile(r"""document\.cookie\s*=\s*["']([^"'=]+)=([^"';]*)""")
+
 
 class WPError(RuntimeError):
     pass
+
+
+def detect_challenge_cookie(url, verbose=True):
+    """Return "name=value" if url answers with a JS cookie challenge, else None."""
+    p = subprocess.run(["curl", "-sS", "-A", UA, "--max-time", "60", url],
+                       capture_output=True)
+    m = CHALLENGE_RE.search(p.stdout.decode("utf-8", errors="replace")[:4000])
+    if not m:
+        return None
+    cookie = "%s=%s" % (m.group(1), m.group(2))
+    if verbose:
+        print("  bot challenge detected at %s - answering with %s" % (url, cookie))
+    return cookie
 
 
 def make_client(base, user=None, password=None, transport="rest", verbose=True,
@@ -39,15 +60,20 @@ def make_client(base, user=None, password=None, transport="rest", verbose=True,
         from wpxmlrpc import WPXMLRPC
         if throttle is not None:
             kwargs["throttle"] = throttle
+        kwargs.setdefault(
+            "cookie",
+            detect_challenge_cookie(base.rstrip("/") + "/xmlrpc.php", verbose))
         return WPXMLRPC(base, user, password, verbose=verbose, **kwargs)
-    return WP(base, user, password, verbose=verbose)
+    return WP(base, user, password, verbose=verbose,
+              cookie=detect_challenge_cookie(base.rstrip("/") + "/wp-json/", verbose))
 
 
 class WP:
-    def __init__(self, base, user=None, app_password=None, verbose=True):
+    def __init__(self, base, user=None, app_password=None, verbose=True, cookie=None):
         self.base = base.rstrip("/")
         self.root = self.base + "/wp-json/wp/v2"
         self.verbose = verbose
+        self.cookie = cookie
         self.auth = None
         if user and app_password:
             token = base64.b64encode(
@@ -71,6 +97,8 @@ class WP:
              "-H", "Accept: application/json, text/plain, */*",
              "-H", "Accept-Language: en-GB,en;q=0.9",
              "-H", "Referer: " + self.base + "/"]
+        if self.cookie:
+            h += ["-b", self.cookie]
         if self.auth:
             h += ["-H", self.auth]
         for e in (extra or []):
