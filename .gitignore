@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Export bundles hold the client's own content and media - never commit them.
+export/
+.import-state-*.json
